@@ -1,0 +1,44 @@
+{
+  "total_blocks": 4,
+  "difficulty": 3,
+  "is_valid": true,
+  "latest_block_hash": "0005fa11aad35a4eb5ed0626e0efae2ee91b49f9ae0d2dfebae650bc05c9b4ff",
+  "chain": [
+    {
+      "index": 0,
+      "timestamp": 1750995444.445931,
+      "formatted_time": "2025-06-27 11:37:24",
+      "data": "创世区块 - 区块链的起始",
+      "previous_hash": "0",
+      "nonce": 5019,
+      "hash": "0003cf397f64b728ef86da72314692ef56b551398a73fc25e501a7602e0fd548"
+    },
+    {
+      "index": 1,
+      "timestamp": 1750995444.4581811,
+      "formatted_time": "2025-06-27 11:37:24",
+      "data": "交易: Alice -> Bob: 25",
+      "previous_hash": "0003cf397f64b728ef86da72314692ef56b551398a73fc25e501a7602e0fd548",
+      "nonce": 6719,
+      "hash": "0005c7e1b1f8443f00244c8d4ba7d3a460e82361f962be66a82a016eac1a1ddd"
+    },
+    {
+      "index": 2,
+      "timestamp": 1750995444.473803,
+      "formatted_time": "2025-06-27 11:37:24",
+      "data": "交易: Bob -> Charlie: 30",
+      "previous_hash": "0005c7e1b1f8443f00244c8d4ba7d3a460e82361f962be66a82a016eac1a1ddd",
+      "nonce": 6155,
+      "hash": "0008f5ed6727a925b751a2c2671d6861d68ea62d50413b38d7a13779ecbbb4bd"
+    },
+    {
+      "index": 3,
+      "timestamp": 1750995444.4834712,
+      "formatted_time": "2025-06-27 11:37:24",
+      "data": "交易: Charlie -> Alice: 40",
+      "previous_hash": "0008f5ed6727a925b751a2c2671d6861d68ea62d50413b38d7a13779ecbbb4bd",
+      "nonce": 16825,
+      "hash": "0005fa11aad35a4eb5ed0626e0efae2ee91b49f9ae0d2dfebae650bc05c9b4ff"
+    }
+  ]
+}

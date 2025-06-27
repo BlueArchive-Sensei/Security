@@ -1,0 +1,26 @@
+{
+  "total_blocks": 2,
+  "difficulty": 3,
+  "is_valid": true,
+  "latest_block_hash": "0000ee71613858971b8377292105757bd48d98467974f506efc7ff37bbd20617",
+  "chain": [
+    {
+      "index": 0,
+      "timestamp": 1750995451.865371,
+      "formatted_time": "2025-06-27 11:37:31",
+      "data": "创世区块 - 区块链的起始",
+      "previous_hash": "0",
+      "nonce": 12,
+      "hash": "0005806eb2cfc2a607d86e2e167620c6e45ce915ba4399f96ed3058acdfba283"
+    },
+    {
+      "index": 1,
+      "timestamp": 1750995455.53013,
+      "formatted_time": "2025-06-27 11:37:35",
+      "data": "2",
+      "previous_hash": "0005806eb2cfc2a607d86e2e167620c6e45ce915ba4399f96ed3058acdfba283",
+      "nonce": 22465,
+      "hash": "0000ee71613858971b8377292105757bd48d98467974f506efc7ff37bbd20617"
+    }
+  ]
+}
