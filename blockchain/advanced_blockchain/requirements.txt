@@ -1,0 +1,12 @@
+flask==2.3.3
+flask-socketio==5.3.6
+python-socketio==5.9.0
+ecdsa==0.18.0
+requests==2.31.0
+cryptography==41.0.4
+websockets==11.0.3
+click==8.1.7
+colorama==0.4.6
+pytest==7.4.2
+python-dotenv==1.0.0
+lz4==4.3.2 
