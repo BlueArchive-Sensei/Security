@@ -24,9 +24,9 @@
    ```bash
    # 如果你有这个项目的Git仓库
    git clone <repository-url>
-   cd blockchain_demo
+   cd blockchain/demo
    
-   # 或者直接下载并解压到blockchain_demo文件夹
+   # 或者直接下载并解压到blockchain/demo文件夹
    ```
 
 2. **检查Python版本**
@@ -38,6 +38,8 @@
 
 3. **一键启动**（推荐）
    ```bash
+   # 进入项目目录
+   cd blockchain/demo
    # 使用启动脚本，可以选择运行测试或演示
    python run_demo.py
    # 或
@@ -46,7 +48,8 @@
 
 4. **直接运行演示**
    ```bash
-   # 在blockchain_demo文件夹中运行
+   # 在blockchain/demo文件夹中运行
+   cd blockchain/demo
    python demo.py
    # 或
    python3 demo.py
@@ -55,6 +58,7 @@
 5. **运行测试**（可选，验证功能）
    ```bash
    # 运行功能测试验证区块链是否正常工作
+   cd blockchain/demo
    python test_blockchain.py
    # 或
    python3 test_blockchain.py
@@ -63,14 +67,15 @@
 ## 📁 项目结构
 
 ```
-blockchain_demo/
-├── blockchain.py       # 区块链核心实现
-├── demo.py            # 演示脚本
-├── test_blockchain.py # 功能测试脚本
-├── run_demo.py        # 一键启动脚本
-├── requirements.txt   # 项目依赖
-├── README.md         # 项目说明文档
-└── *.json            # 运行后生成的区块链数据文件
+blockchain/
+└── demo/
+    ├── blockchain.py       # 区块链核心实现
+    ├── demo.py            # 演示脚本
+    ├── test_blockchain.py # 功能测试脚本
+    ├── run_demo.py        # 一键启动脚本
+    ├── requirements.txt   # 项目依赖
+    ├── README.md         # 项目说明文档
+    └── *.json            # 运行后生成的区块链数据文件
 ```
 
 ## 🔧 核心功能
@@ -201,7 +206,7 @@ print(f"Bob余额: {bob.get_balance()}")
 
 ```bash
 # 进入项目目录
-cd blockchain_demo
+cd blockchain/demo
 
 # 运行测试
 python3 test_blockchain.py
