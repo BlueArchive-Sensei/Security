@@ -6,6 +6,10 @@
 >
 > 本文档是解释性笔记，不是逐句翻译。目标是说清：这篇论文在解决什么问题、做了哪三件事、每一节各自在论证什么。
 
+> **版本提示**：本文对应 arXiv v1（2026-09-10）。公开 LaTeX 源码仍有 20 处 `TODO` / `task` 标记，其中明确写着两个尚未补完的附录：1,400 个性能 fuzz shape 的生成细节，以及静态检查器把未建模指令转成 opaque syntax 的实例。因此，下文会把“论文已经给出完整证据”“实验观察”“作者据此作出的推广”分开写，不能把 v1 的所有主张都当作已经完成 artifact evaluation 的定论。
+
+本地材料：[`PDF`](arxiv_2609.11356/paper.pdf) · [`提取文本`](arxiv_2609.11356/paper.txt) · [`LaTeX 源码`](arxiv_2609.11356/source/main.tex) · [`原始图`](arxiv_2609.11356/source/figures/) · [`渲染图`](arxiv_2609.11356/rendered_figures/)
+
 ---
 
 ## 0. 一句话先说清整篇论文在干什么
@@ -576,7 +580,245 @@ Flash Attention 式递推：把一行 key 切成宽 \(w\) 的块。维护 fp32 �
 
 ---
 
-## 11. 把三件事串成一条工作流
+## 11. 逐图逐表精读：每张图真正提供了什么证据
+
+这一节不再按论文段落复述，而是把所有图表当成“证据对象”来读。一个实用原则是：**示意图说明机制，表格说明覆盖，性能图说明代价；三者不能互相替代。**
+
+### 11.1 Figure 1：layout 为什么通常会改树，以及钉树后为什么可以自由换 layout
+
+![Figure 1：Pinning the reduction order](arxiv_2609.11356/rendered_figures/inner-tree.png)
+
+图中颜色编码了归约的三个物理层级：绿色是线程内寄存器加法，黄色是 warp 内 lane shuffle，粉色是跨 warp shared-memory 合并。叶子是逻辑输入 \(a_0,a_1,\ldots\)，根旁边的 `bits X/Y` 是最终浮点比特。
+
+**Panel (a)：自由顺序。**
+
+- Layout A：4 个线程、每线程 2 个元素、2 个 warp。先在线程内合并两项，再在 warp 内合并，最后跨 warp。
+- Layout B：2 个线程、每线程 4 个元素、1 个 warp。每个线程先形成更长的局部链，再在 warp 内合并。
+- 两边叶子相同、数学和相同，但括号结构不同，所以根分别为 `bits X` 与 `bits Y`。图的目的不是说“线程越少越不准”，而是说明 **layout 改变了哪些叶子先共享累加器**。
+
+**Panel (b)：inner-tree 钉死顺序。**
+
+- Layout A：4 线程 × 4 元素、2 warp；Layout B：8 线程 × 2 元素、1 warp。
+- 两边的线程/warp 分界不同，物理交换次数也不同，但逻辑叶子先按相邻项构成高度一致的平衡子树，最后得到同一棵等价树，所以都是 `bits X`。
+- 这正是第 6 节检查器要识别的情况：**物理实现不同，逻辑树相同**。若检查器只比较指令序列或 warp 数，它会错误地把这两者拆开。
+
+**Panel (c)：布局优化。**
+
+- `before` 中归约轴跨越两个 warp；同一行的编号分散在 warp 0 和 warp 1，因此需要 shared-memory 往返、barrier 和第二轮 shuffle。
+- `after` 把每个完整归约放进一个 warp；warp 0 负责一组行，warp 1 负责另一组，跨 warp 阶段消失。
+- 这项重排只有在树已经由 `inner_tree` 固定后才安全。否则，“把轴塞进一个 warp”同时会改变括号结构。
+
+**这张图能证明什么：**给出机制性反例和优化直觉。**不能单独证明什么：**不能证明编译器对所有 layout 都保持同一树；那个保证还依赖第 5 节 lowering 规则、Algorithm 1 的 guard，以及第 7 节的字节测试。
+
+### 11.2 Figure 2：四种 GEMM 家族到底在哪里“关掉”累加器
+
+![Figure 2：GEMM algorithm families](arxiv_2609.11356/rendered_figures/gemm-reduction-orders.png)
+
+这张图横轴都是收缩维 \(K\)，关键图例是：灰色小格表示一次 accumulate step；圆角框表示一个累加器的生命周期；框闭合意味着发生舍入、写回或进入下一层合并；橙色标记的是 `GEMMDesc` 必须记录的切分。
+
+| Panel | 图上结构 | 真正决定比特的量 | 容易误读之处 |
+| --- | --- | --- | --- |
+| (a) Plain GEMM | 一个 accumulator 从 \(k=0\) 活到结尾，最后转输出类型 | `instruction_k`、`use_fast_accum`、短 K-loop 在首还是尾 | `BLOCK_K` 画在循环上，但按论文的 Tensor Core 语义，它通常只重分循环，不重分累加链 |
+| (b) Split-K | 多个 threadblock 各自从 0 开始，第二个 kernel 按 index order 合并 partial | 外层 `span`、嵌套 `k_cuts`、partial/merge dtype | “第二次 launch 是调度细节”是错的；它引入新的归约层和新的舍入精度 |
+| (c) Chained chunks | 一个 threadblock 内有外切和内切，每层都会关闭局部 accumulator | 两层或多层 `span` 的嵌套 | 它不是 split-K 的同义词，因为不跨 block、也不一定写 workspace |
+| (d) GEMV | lane \(j\) 每隔 `count=4` 取一个 tile，再做 lane tree | `layout=STRIDED`、`count`、butterfly 方向 | 这里的切片不连续；只记录“4 个 lane”不足以恢复哪几个 \(k\) 先相加 |
+
+可以把 `GEMMDesc` 心智模型写成下面这个非正式 schema：
+
+```text
+GEMMDesc
+├── instruction / instruction_k / accumulator behavior
+├── ordered list of K cuts
+│   ├── span
+│   ├── contiguous or strided layout
+│   └── count / merge order
+├── partial_dtype
+├── merge_dtype
+└── output rounding point
+```
+
+论文没有在正文给出一段正式的数据结构定义；它是由第 3 节各字段的文字定义共同构成的。因此“描述符完整”主要由三类证据支撑：省略的速度旋钮被论证为不改树；保留的字段能被数值探测区分；最终重建在测试集上逐字节命中。
+
+### 11.3 Figure 3：`inner_tree` 在后端实际上只改了什么
+
+Figure 3 不是性能图，而是一段 Triton C++ lowering 代码。核心循环是：
+
+```cpp
+for (unsigned N = 1; N <= nLane / 2; N <<= 1)
+    shfl = shuffleXor(acc, N * interleave);
+```
+
+默认路径使用相反方向的 offset；新路径从 1 开始递增。读这段代码要抓住三点：
+
+1. `shuffleXor` 的集合没变，变的是执行顺序；浮点 combine 的括号因此改变。
+2. “邻居先配对”让最底层子树由逻辑相邻元素决定，更容易跨 layout 保持。
+3. 只修 warp 内循环不够，所以正文强调同一开关也要作用于线程内 fold 和跨 warp 阶段。
+
+AMD 后端并不复用相同指令：wave64 用 `row_shr` 的 1,2,4,8 顺序实现同一逻辑树；wave32 或 partial wave 退回较慢的 shared shuffle 路径。这说明论文承诺的是**逻辑依赖树**，不是指令文本一致。
+
+### 11.4 Figure 4：检查器怎样把两段不同 PTX 收敛成一个签名
+
+![Figure 4：Static checker walk](arxiv_2609.11356/rendered_figures/checker-walk.png)
+
+左侧 kernel A 是 4 线程 × 4 元素、2 warp：地址是 `%rd0 + 16t`，线程内先形成 4 元素、2 层的小树，之后做一次 warp shuffle，再经 shared store/barrier/load 合并另一个 warp。右侧 kernel B 是 8 线程 × 2 元素、1 warp：地址是 `%rd0 + 8t`，线程内只加一对，随后做 offset 1、2、4 的 butterfly。
+
+表面差异非常大：
+
+- 地址计算指令不同：乘 16 vs mask 后乘 8；
+- 线程内工作量不同；
+- A 有 shared memory 和 barrier，B 没有；
+- launch geometry 不同。
+
+检查器不比较这些表面结构，而是恢复叶子地址与 combine 关系。两边最终都得到：
+
+```text
+combine = add.f32
+reduction height = 4        # 2^4 = 16 个逻辑输入
+nearest-leaf offset = 1
+```
+
+所以签名相同。这里 `height=4` 不是“做了 4 条 shuffle”，而是树从叶到根有 4 层。Shared-memory exchange 只搬运 partial、不执行 combine，因此不增加高度。
+
+这张图也解释了 soundness / completeness 的取舍：能证明为同一逻辑树的合并；不能识别的语法变成 opaque token，导致多拆而不是误合并。
+
+### 11.5 Figure 5：不要只看柱高，要先看分母是什么
+
+![Figure 5：GEMM 与融合 epilogue 性能](arxiv_2609.11356/rendered_figures/perf.png)
+
+**Panel (a)：单独 GEMM。**纵轴是“相对 cuBLAS 的速度”，1.0 才等于 cuBLAS。横轴先按小于/大于 5 GFLOP 分区，再按层类型分组；括号是该组 shape 数量。三种柱分别是 torch.compile 生成的自由顺序 Triton GEMM、本文 bit-exact Triton GEMM、GB300 大张量加速版。
+
+正确读法：
+
+- 柱子从 0.6 升到 0.8，表示缩小与 cuBLAS 的差距，不表示比 cuBLAS 快 20%。
+- bit-exact 柱偶尔高于自由顺序柱，说明“允许任意顺序”只扩大搜索空间，不保证 autotuner/代码生成一定找到更快实现。
+- 这组比较混合了两个差异：是否逐位复现 cuBLAS，以及作者 kernel 与 torch.compile kernel 的工程质量。因此不能把全部差值解释成“逐位约束税”。
+
+**Panel (b)：GEMM + epilogue。**纵轴仍相对基线，但基线改成“cuBLAS GEMM + 单独 epilogue kernel”的完整调用时间，包含两次 launch。论文给出 launch 占该基线的 82%。融合核即使设备执行部分更慢，只要省下一次 launch，端到端仍可能达到 1.68×。
+
+因此 Figure 5 支持的是：**在可以融合的真实计算图里，逐位约束可以被 launch/memory traffic 的系统级收益盖过。**它不支持“本文单独 GEMM 普遍快于 cuBLAS”。Panel (a) 恰好显示大多数单独 GEMM 仍慢于 cuBLAS。
+
+### 11.6 Figure 6：白色是约束损失，彩色是 layout pass 拿回的部分
+
+![Figure 6：Pinned reduction layout optimization](arxiv_2609.11356/rendered_figures/layout.png)
+
+每根柱以“自由顺序、独立 autotune 后的最佳速度”为 100%。白色部分是只开启 raw `inner_tree` 的速度，叠加的彩色部分是 layout optimization 后增加的速度；最终柱顶数字才是优化后的总比例。
+
+**H100（10 个 kernel）：**最终分别约为 101.0%、99.1%、99.5%、111.0%、98.3%、97.7%、102.6%、118.9%、100.0%、141.9%。其中 6 个达到或超过 100%，严格超过 100% 的是 5 个；141.9% 对应 GEMM epilogue 的列归约，正是摘要所说“最多快 42%”的来源。
+
+**GB300（17 个 kernel）：**最终范围约 57.3%–100.2%，只有一个略过 100%。多组 fp16/fp8 同名 kernel 成对出现，说明 dtype 会改变寄存器压力、可用指令和 convert-layout 成本，不能从 H100 的收益直接外推到 Blackwell。
+
+图中 27 根柱有 19 根落在 90% 以上。但还应看到长尾：GB300 最差项只剩 57.3%。所以更准确的结论是“多数 kernel 的成本能收回到 10% 内，少数形状仍很贵”，而不是“强制顺序基本免费”。
+
+### 11.7 Figure 7：四项贡献分别插在编译链的哪个位置
+
+![Figure 7：High-level graph](arxiv_2609.11356/rendered_figures/big-picture.png)
+
+左边是开放 Triton 路径：template → 多个 autotuner configuration → tile IR → PTX/GCN → SASS → execution code。右边是闭源 cuBLAS 路径：有限算法信息的 API → 闭源 CUDA compiler → SASS。中间四层对应论文贡献：
+
+1. 第 4 节从 cuBLAS 黑盒反推出 `GEMMDesc`；这是 offline reconstruction，不是每次调用现场探测。
+2. 第 5 节在 tile IR 到后端 lowering 之间强制归约树并优化 layout。
+3. 第 6 节在 PTX/GCN 层比较 configuration，发生在 `ptxas` 之前。
+4. 执行时再做字节比较验证，但静态 soundness 最终只相对于 PTX/GCN；图上 PTX→SASS 的箭头就是论文尚未检查的信任边界。
+
+### 11.8 Figure 8：cuBLAS 丢尾巴不是舍入误差，而是少算了 8 项
+
+![Figure 8：cuBLAS split-K tail bug](arxiv_2609.11356/rendered_figures/cublas-tail.png)
+
+图把 \(K=8648\) 切给 9 个 CTA。每个 CTA 处理 15 个完整的 64-wide block，即 \(15\times64=960\) 项；9 个 partial 全部被 `splitKreduce` 合并，因此输出是 \(9\times960=8640\)。问题是覆盖区间只到 \([0,8640)\)，尾部 8 项从未分配给任何 CTA。
+
+这里用全 1 输入非常关键：fp32 可以精确表示 \(8648<2^{24}\) 的整数和，所以 8640 不可能由舍入偶然产生，它就是参与求和的项数。Figure 8 因而是一个**逻辑覆盖 bug**的直接证据，而非普通数值不稳定。
+
+### 11.9 Table 1：390 个“真实 shape”覆盖了什么，没覆盖什么
+
+| 层类型 | 数量 | \(M\) | \(N\) | \(K\) | 对性能的主要压力 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Attention projections | 45 | 256–16,384 | 2,048–18,432 | 2,048–16,384 | 三维都较大，典型吞吐型 GEMM |
+| MLP up | 21 | 256–16,384 | 6,144–33,792 | 2,048–7,168 | 输出宽、适合融合激活 |
+| MLP down | 21 | 256–16,384 | 2,048–7,168 | 6,144–33,792 | 深 K，考验 K-loop/分块 |
+| MoE up | 55 | 16–3,072 | 512–3,072 | 2,048–8,192 | 小 M，launch 与利用率敏感 |
+| MoE down | 57 | 16–6,144 | 2,048–8,192 | 512–3,072 | routing 后尺寸更碎 |
+| LM head | 54 | 1–256 | 100,352–248,320 | 2,048–8,192 | 极宽 N、小 M，接近 GEMV |
+| LoRA B | 137 | 80–16,384 | 768–32,768 | 8–64 | 极浅 K，固定开销占主导 |
+
+这套静态集很有代表性，但不是 workload trace：\(M\) 是选取的 token 数范围，不含请求到达分布、动态 batching 频率、序列长度分布和多 GPU 通信。因此它适合比较 kernel 形状，不足以直接推导端到端 serving 吞吐。
+
+### 11.10 Table 2：100% 命中的分母必须先排除库自身错误
+
+GB300 fp16 的原始结果是 110,813 个 shape 中 110,753 个逐字节相同，表面比例约 99.946%。剩余 60 个全部落在 nvjet split-K 尾部缺失 bug。论文的“100%”定义是：**在 cuBLAS 确实计算完整 \(K\) 的 shape 中，重建全部命中。**
+
+跨架构行也是同样口径：GB300 fp8 99.93%、GB200 99.81%、H100 99.82% 是包含 bug 的原始字节命中率；把已定位 bug 排除后才是 100%。这不是偷偷删异常点，因为作者给出了不用 Triton 的独立复现和充要预测条件；但它意味着“复现 cuBLAS 的逐位行为”与“复现 cuBLAS 的错误输出”被有意区分。重建 kernel 选择实现预期的完整 GEMM，而不是刻意复制漏算。
+
+### 11.11 Table 3：检查器的完整精度画像
+
+下面保留最关键的 PTX 数字；`checker/bytes` 是静态类数与硬件真实类数，二者之比就是 over-split。所有行的 over-merge 都是 0。
+
+| Kernel | 配置数 | 静态类 | 字节真实类 | 过拆倍数 |
+| --- | ---: | ---: | ---: | ---: |
+| 16 个不同维/轴 reduction | 2,304 | 204 | 81 | 2.5× |
+| softmax | 144 | 8 | 4 | 2.0× |
+| layernorm | 144 | 19 | 9 | 2.1× |
+| rmsnorm | 144 | 17 | 8 | 2.1× |
+| gemm | 6,304 | 1 | 1 | **1.0×** |
+| gemm+bias+relu fusion | 192 | 1 | 1 | **1.0×** |
+| gemm_kgroup | 1,152 | 138 | 6 | 23.0× |
+| gemm_reduce_sum | 270 | 60 | 9 | 6.7× |
+| gemm_softmax | 270 | 60 | 9 | 6.7× |
+| gemm_tma_store | 18 | 1 | 1 | **1.0×** |
+| Inductor sum loop | 20 | 20 | 20 | **1.0×** |
+| Inductor split-K GEMM | 4 | 4 | 4 | **1.0×** |
+| Flash Attention | 2,720 | 2,655 | 266 | 10.0× |
+
+如何理解：
+
+- 对普通 GEMM，6,304 个配置全部属于同一真实类，检查器也正好合成一类。这直接验证了论文关于 `BLOCK_M/N/K` 等速度旋钮不改该 GEMM 算术的判断。
+- 对 Inductor sum/split-K，类数很多但 1.0×，表示检查器不是“一律合并”；真实树不同就能精确拆开。
+- 对 `gemm_kgroup` 和 Flash Attention，检查器非常保守，分别多拆 23× 和 10×。接到 autotuner 后仍然安全，但可能错过大量本可参与测速的等价配置，因而损失最优性能。
+- AMD 结果不是 PTX 数字的简单复刻，而是独立 gfx942 corpus。普通 GEMM 仍为 1.0×，但 AMD 的 softmax/layernorm/rmsnorm 分别过拆 3.3×/6.7×/6.7×，说明前端算法相同不代表两套 ISA 上同样容易恢复。
+
+最重要的统计边界：表里的 0 over-merge 是相对于“所测配置 × 所测随机输入的字节分组”，不是形式化证明所有可能输入都等价。论文的 soundness 论证来自检查器构造：无法证明的表达式不合并；实验是在大语料上寻找反例，二者共同构成证据。
+
+### 11.12 Table 4–6 与 Algorithm 1：附录中的三条补充证据
+
+**Table 4（模型配置）**解释 Table 1 的来源，但只记录 config 维度，不是运行 trace。16 个模型取自 2026-08-16 Hugging Face 榜单；这也意味着后续模型结构变化不会自动进入 shape 集。
+
+**Table 5（cuBLAS bug 的版本/架构矩阵）**说明 bug 触发取决于“架构 × 库版本 × heuristic”：\(K=8648\) 在 GB300 13.1.x 丢 8，在 GB300 12.8.5 正常；\(K=57608\) 恰好相反。不能靠维护一张固定的坏 \(K\) 黑名单解决。
+
+**Table 6（GB300 加速）**的数值是 `cuBLAS time / 本文 kernel time`，大于 1 才是本文更快。per-MMA 2.086×、grouped split-K 1.639× 的胜出都在未对齐场景，主要收益来自重打包恢复对齐；它不代表常规对齐 GEMM 普遍快两倍。加速路径做了 154,904 次字节比较零差异，但每次调用约 100 µs 的 host descriptor 开销仍显著高于普通指针 launch 的约 20 µs，小 GEMM 会看见这部分成本。
+
+**Algorithm 1（layout pass）**是一个保守 rewrite：不是 blocked layout、跨 block、已经 warp-synchronous、预计每线程元素超过上限、候选没有增加轴上 lane 数、或轴已经铺得足够开，都会 skip。这个结构很重要：论文性能图里的长尾并非 pass 错了，而往往是 pass 为避免 spill/无效转换而拒绝改写。
+
+---
+
+## 12. 论文的证据强度、尚未闭合之处与我的判断
+
+### 12.1 最强的部分
+
+1. **cuBLAS 黑盒重建有很强的交叉验证。**不是只做随机输出拟合，而是 profiling 定家族、构造数值探针读边界、cost-model answer 全枚举，再用超过百万级 shape campaign 做字节验证；还能独立发现并预测 vendor bug。
+2. **描述符与优化的分离非常有工程价值。**先冻结算术语义，再允许 persistent grid、warp specialization、pipeline、swizzle 等调度变化。这比“打开 deterministic mode 后停止调优”更可扩展。
+3. **检查器的错误方向选得正确。**宁可 over-split 也不 over-merge，符合数值可复现的安全需求。Table 3 明确暴露了保守性，没有只报告 0 假阳性。
+
+### 12.2 需要保留意见的部分
+
+1. **Tensor Core 语义是经实验支持的建模假设，不是公开 ISA 的完整形式语义。**尤其 fp8 已经出现 `mma.sync` 与 `tcgen05.mma` 不等价，未来硬件或 microcode 可能引入新 cadence。
+2. **静态 soundness 截止到 PTX/AMDGCN。**`ptxas`、driver JIT 和最终 SASS 没进 checker；论文自己承认这是信任边界。
+3. **性能比较不是纯粹的 ablation。**作者 kernel、torch.compile kernel、cuBLAS 的实现质量与功能边界不同；融合实验又改变了 kernel 数量。结果能证明“约束不必然慢”，不能精确量化“仅固定归约树的平均税率”。Figure 6 才更接近这个 ablation。
+4. **跨机器 descriptor 稳健性尚未实验。**字段设计看起来与机器无关，不等于已经证明同一 descriptor 在不同 GPU/driver 上逐位一致。
+5. **Attention 仍是理论草图。**Table 3 的 Flash Attention 检查结果表明 checker 能处理一部分已编译实例，但完整 Attention descriptor、compiler enforcement 与 bit-exact reconstruction 都没有实现。
+6. **v1 artifact 描述不完整。**源码明确欠缺随机性能 shape 生成附录和 opaque-syntax 示例；Table 3 还预留了 bf16/fp32/fp8/fp8e5m2 的完整分 dtype 数据位置。因此复现时不能只依赖论文当前文本。
+
+### 12.3 我认为最值得学习的研究方法
+
+这篇论文最有价值的不只是“做了一个 deterministic GEMM”，而是一套研究闭源数值语义的方法：
+
+1. 先把不可见的行为压缩成**最小机制描述符**，避免直接模仿庞大的实现细节。
+2. 为描述符的每个字段设计能产生离散输出的**对抗性数值探针**，把浮点舍入当成观测仪器。
+3. 把黑盒启发式的无限 shape 空间，经由有限 cost-model answer 压成可枚举的 arch profile。
+4. 用静态 checker 验证编译后实例仍处于同一语义类，再让 autotuner 只优化类内调度。
+5. 当 vendor 输出异常时，不急着把它当作模型错误，而是构造全 1 等“可精确计数”的输入，区分舍入差异与漏算逻辑 bug。
+
+---
+
+## 13. 把三件事串成一条工作流
 
 读完全文后，可以按时间线这样理解作者实际在做的系统：
 
@@ -619,7 +861,7 @@ shape + SM + 库版本
 
 ---
 
-## 12. 阅读时容易混的几组概念
+## 14. 阅读时容易混的几组概念
 
 | 容易混在一起的 | 实际区别 |
 | --- | --- |
@@ -633,7 +875,7 @@ shape + SM + 库版本
 
 ---
 
-## 13. 和本仓库可能相关的读法（可选）
+## 15. 和本仓库可能相关的读法（可选）
 
 如果从动态 kernel 生成 / Triton / GEMM 实现的角度读这篇，最值得带走的不是「他们比了多少 TFLOP」，而是这几条可操作约束：
 
@@ -649,3 +891,6 @@ shape + SM + 库版本
 - 论文摘要页：<https://arxiv.org/abs/2609.11356>
 - 论文 PDF：<https://arxiv.org/pdf/2609.11356>
 - HTML 全文：<https://arxiv.org/html/2609.11356v1>
+
+- 本地 PDF：[`paper/arxiv_2609.11356/paper.pdf`](arxiv_2609.11356/paper.pdf)
+- 本地 LaTeX 源码：[`paper/arxiv_2609.11356/source/main.tex`](arxiv_2609.11356/source/main.tex)
