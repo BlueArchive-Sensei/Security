@@ -1,0 +1,3 @@
+[submodule "paper"]
+	path = paper
+	url = https://github.com/BlueArchive-Sensei/ai_paper.git
